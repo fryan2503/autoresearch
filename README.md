@@ -1,91 +1,116 @@
 # autoresearch
 
-![teaser](progress.png)
+This repo is an adaptation of the autoresearch idea for a tabular ML project: an LLM agent repeatedly edits an XGBoost training script, runs an experiment, checks whether holdout F1 improved, and keeps or discards the change.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+The current project is a LendingClub loan-default classification pipeline built around [`train_xgb.py`](train_xgb.py).
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+Original autoresearch concept and repo by Andrej Karpathy. See his announcement [here](https://x.com/karpathy/status/2029701092347630069).
 
-## How it works
+## What This Repo Does
 
-The repo is deliberately kept small and only really has three files that matter:
+The main script:
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+- loads `data/train.csv`, `data/holdout.csv`, and `data/score.csv`
+- cleans and engineers features
+- builds a scikit-learn preprocessing pipeline
+- runs randomized hyperparameter search for XGBoost
+- tunes a classification threshold on the holdout split
+- writes search results to `model_results/`
+- writes a submission file to `data/kaggle_submissions/`
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+The primary objective is **holdout F1**. Higher is better.
 
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+Holdout AUC is useful context, but F1 is the metric the agent should optimize.
 
-## Quick start
+## Current Workflow
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+This repo is intentionally narrow in scope:
+
+- [`train_xgb.py`](train_xgb.py) is the file the agent edits
+- [`program.md`](program.md) contains the instructions for the autonomous experiment loop
+- [`data_dictionary.csv`](data_dictionary.csv) is the feature reference the agent should read before making feature engineering changes
+
+The agent loop is simple:
+
+1. run the baseline script
+2. change only `train_xgb.py`
+3. run another experiment
+4. compare holdout F1 against the previous best
+5. keep improvements and discard regressions
+
+## Quick Start
+
+Requirements:
+
+- Python 3.10+
+- packages from [`requirements.txt`](requirements.txt)
+- optional NVIDIA GPU for faster XGBoost training
+
+Setup:
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
-uv sync
-
-# 3. Download data and train tokenizer (one-time, ~2 min)
-uv run prepare.py
-
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python train_xgb.py
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+The script uses CUDA when available and otherwise falls back to CPU. MPS is not supported by the current code path.
 
-## Running the agent
+## Files That Matter
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-The `program.md` file is essentially a super lightweight "skill".
-
-## Project structure
-
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+```text
+train_xgb.py          — active training pipeline; this is the file to modify
+program.md            — agent instructions for the autonomous experiment loop
+data_dictionary.csv   — feature descriptions for feature engineering decisions
+data/train.csv        — training split
+data/holdout.csv      — validation/holdout split used for model selection
+data/score.csv        — unlabeled scoring split for submission generation
+model_results/        — random-search result exports
+data/kaggle_submissions/ — generated submission files
+utils/emp_title_cleaning.py — helper used by the training script
 ```
 
-## Design choices
+## Output
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+A typical run prints progress for:
 
-## Platform support
+1. loading data
+2. cleaning and feature engineering
+3. building the preprocessor
+4. training random-search candidates
+5. generating the submission
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+At the end of a run, the script writes:
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+- a CSV of search results in `model_results/`
+- a submission CSV in `data/kaggle_submissions/`
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+The final summary line includes the best parameter set, AUC, F1, and threshold chosen on the holdout set.
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
+## Using An Agent
 
-## Notable forks
+The repo is designed for an agentic workflow. Point your coding agent at [`program.md`](program.md) and have it operate on this repo directly.
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
+The intended constraints are:
+
+- edit only [`train_xgb.py`](train_xgb.py)
+- read [`data_dictionary.csv`](data_dictionary.csv) before substantial feature engineering changes
+- track experiments in `results.tsv`
+- optimize for holdout F1, not for code complexity on its own
+
+Example prompt:
+
+```text
+Look at program.md and start the experiment loop for train_xgb.py.
+```
+
+## Notes
+
+- This repo is inspired by the original autoresearch idea, but it is not the original 5-minute LLM training setup.
+- Original autoresearch creator: Andrej Karpathy.
+- The old `train.py` workflow is not the active path for this project.
+- If you update the search space, feature engineering, or threshold logic, keep the script runnable end-to-end and preserve the ability to compare experiments cleanly.
 
 ## License
 
