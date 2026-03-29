@@ -21,3 +21,10 @@ dev/
 
 # Results file
 results.tsv
+data/
+*data/
+
+*DS_Store
+DSS_Store
+
+*model_results/
